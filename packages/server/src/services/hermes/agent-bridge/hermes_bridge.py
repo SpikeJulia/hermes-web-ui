@@ -1496,11 +1496,36 @@ class AgentPool:
             response_queue: queue.Queue[str] = queue.Queue(maxsize=1)
             with self._lock:
                 self._clarify_requests[clarify_id] = response_queue
+            # IPC boundary normalization: the upstream `clarify` tool schema
+            # (tools/clarify_tool.py) declares `choices` as `array<string>`.
+            # Agents occasionally violate that contract and pass
+            # `[{key, value}, ...]` dicts. Without this guard, every downstream
+            # client (TS event stream → Pinia store → Vue) treats items as
+            # strings and renders the dict as Python repr, while button
+            # clicks echo the whole dict back to the agent as the response.
+            # Coerce dicts to their `value` field here so the wire contract
+            # stays `list[str]` and all clients stay simple. (2026-06-07)
+            normalized_choices: list[str] | None = None
+            if choices:
+                normalized_choices = []
+                for c in choices:
+                    if isinstance(c, dict):
+                        v = c.get("value") or c.get("label") or c.get("text")
+                        if v is None:
+                            v = str(c)
+                        normalized_choices.append(str(v))
+                        print(
+                            f"[clarify-normalize] session={session_id} "
+                            f"dict-choice coerced to .value (key={c.get('key')!r})",
+                            file=sys.stderr,
+                        )
+                    else:
+                        normalized_choices.append(str(c))
             self._append_event(session_id, {
                 "event": "clarify.requested",
                 "clarify_id": clarify_id,
                 "question": str(question or ""),
-                "choices": list(choices) if choices else None,
+                "choices": normalized_choices,
                 "timeout_ms": 300_000,
             })
             try:
